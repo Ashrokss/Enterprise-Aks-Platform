@@ -1,19 +1,103 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+# Terraform CI for the AKS platform.
+# This pipeline only validates and plans. Apply is added once plan output looks right.
 
 trigger:
-- main
+  branches:
+    include:
+      - main
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+variables:
+  TF_VERSION: 1.15.5
+  SERVICE_CONNECTION: azure-sub-connection
+  # Stops Terraform printing "next step" suggestions meant for humans.
+  TF_IN_AUTOMATION: 'true'
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+stages:
+  - stage: validate
+    displayName: Validate
+    jobs:
+      - job: fmt_and_validate
+        displayName: fmt and validate
+        steps:
+          - task: TerraformInstaller@1
+            displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          # Fails the build on unformatted code before anything slower runs.
+          - script: terraform fmt -check -recursive
+            displayName: terraform fmt -check
+
+          # -backend=false because validate only needs provider schemas,
+          # not the remote state, so this step needs no Azure credentials.
+          - script: |
+              set -e
+              for env in dev staging; do
+                echo "----- $env -----"
+                terraform -chdir=environments/$env init -backend=false -input=false
+                terraform -chdir=environments/$env validate
+              done
+            displayName: terraform validate
+
+  - stage: plan
+    displayName: Plan
+    dependsOn: validate
+    jobs:
+      - job: plan_dev
+        displayName: plan dev
+        steps:
+          - task: TerraformInstaller@1
+            displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: AzureCLI@2
+            displayName: terraform plan (dev)
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              # Exposes the federated identity to the script as $idToken etc.
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                # Backticks, not $(), because Azure DevOps would try to expand $().
+                export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                cd environments/dev
+                terraform init -input=false
+                terraform plan -input=false -lock-timeout=5m
+
+      - job: plan_staging
+        displayName: plan staging
+        steps:
+          - task: TerraformInstaller@1
+            displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: AzureCLI@2
+            displayName: terraform plan (staging)
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                cd environments/staging
+                terraform init -input=false
+                terraform plan -input=false -lock-timeout=5m
