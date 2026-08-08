@@ -16,12 +16,12 @@
 
 ## 📌 What this is
 
-An Azure platform-engineering project that provisions a **multi-environment AKS setup** using reusable Terraform modules, remote state in Azure Storage, and (soon) Azure DevOps pipelines.
+An Azure platform-engineering project that provisions a **multi-environment AKS setup** using reusable Terraform modules, remote state in Azure Storage, and Azure DevOps pipelines.
 
 Every line is written by hand rather than copied from a template — the goal is to *understand* Terraform, Azure networking, AKS, and CI/CD, not just to make `terraform apply` succeed. Where something bit me, it's documented in [Lessons learned](#-lessons-learned) instead of quietly fixed.
 
-**Working today:** 7 Terraform modules · 2 isolated environments · remote state with locking · service-principal auth · secrets in Key Vault
-**Next up:** `azure-pipelines.yml`
+**Working today:** 7 Terraform modules · 2 isolated environments · remote state with locking · service-principal auth · secrets in Key Vault · CI pipeline running `fmt` → `validate` → `plan` on both environments with OIDC federation
+**Next up:** gated `apply` stages and a manual-only destroy pipeline
 
 ---
 
@@ -88,6 +88,7 @@ Enterprise-Aks-Platform/
 ├── scripts/
 │   └── init.sh               # bootstraps the state backend
 ├── screenshots/
+├── azure-pipelines.yml       # CI: fmt, validate, plan
 ├── architecture.png
 ├── .gitattributes            # LF endings for Linux pipeline agents
 ├── .gitignore
@@ -255,6 +256,79 @@ terraform destroy
 
 ---
 
+## 🔄 CI/CD pipeline
+
+[`azure-pipelines.yml`](azure-pipelines.yml) runs on every push to `main`. GitHub stays the source of truth; Azure DevOps only supplies pipelines, environments, and approvals.
+
+```mermaid
+flowchart LR
+    PUSH([push to main]) --> FMT[terraform fmt -check]
+    FMT --> VAL[terraform validate<br/>dev + staging]
+    VAL --> PD[plan · dev]
+    VAL --> PS[plan · staging]
+
+    style FMT fill:#844FBA,color:#fff
+    style PD fill:#0078D4,color:#fff
+    style PS fill:#0078D4,color:#fff
+```
+
+**Two stages, deliberately split by whether they need credentials.**
+
+`validate` runs `fmt -check` first because it costs nothing and catches the cheapest class of mistake. Then `terraform init -backend=false && terraform validate` for both environments. The `-backend=false` matters: validate only needs provider *schemas*, not remote state, so the whole stage runs **without touching Azure at all**. Broken HCL is caught for free.
+
+`plan` depends on `validate`, so it never runs against code that couldn't compile. One job per environment.
+
+### Authentication — no secrets anywhere
+
+The service connection uses **workload identity federation with OIDC**, so nothing needs storing or rotating:
+
+```yaml
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: azure-sub-connection
+    addSpnToEnvironment: true      # exposes the federated identity to the shell
+    inlineScript: |
+      export ARM_USE_OIDC=true
+      export ARM_CLIENT_ID="$servicePrincipalId"
+      export ARM_OIDC_TOKEN="$idToken"
+      export ARM_TENANT_ID="$tenantId"
+      export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+```
+
+`$idToken` is a short-lived token minted per run. Those four `ARM_*` variables are the entire contract between Azure DevOps and the azurerm provider.
+
+Two non-obvious details in there:
+
+- **Backticks, not `$(...)`.** Azure DevOps treats `$(...)` as its own macro syntax and expands it before bash ever sees it, so command substitution has to use backticks.
+- **`ARM_SUBSCRIPTION_ID` is mandatory.** azurerm 4.x requires an explicit subscription; it can no longer infer one.
+
+### Permissions the pipeline identity needs
+
+Azure DevOps creates the service connection with **Contributor** and nothing else. That is not enough:
+
+| Grant | Why | Failure without it |
+|---|---|---|
+| **User Access Administrator** | The config creates subscription-scoped role assignments | `AuthorizationFailed` |
+| Graph **`Application.ReadWrite.OwnedBy`** + admin consent | The config creates an Entra app registration | `Insufficient privileges` |
+
+Azure RBAC and Entra directory permissions are **separate systems** — no RBAC role, including Owner, grants the ability to create app registrations.
+
+### Environments and approval gates
+
+`dev` and `staging` exist as Azure DevOps **Environments**, each with an approval check. Approvals attach to environments, which is why apply stages must be `deployment` jobs rather than plain `job`s.
+
+Both environments are gated, including `dev` — which departs from the usual "dev auto-applies" pattern on purpose. `trigger: main` means every push would otherwise spin up a real AKS cluster that bills until someone remembers it. A gate on `dev` keeps teardown deliberate.
+
+> ⚠️ **Ordering hazard:** a `deployment` job auto-creates its environment, but **not** its approvals. Push apply stages before configuring approvals and the first run applies ungated.
+
+### Why the apply stages re-plan
+
+The textbook pattern is `plan -out=tfplan` → publish as a pipeline artifact → `apply tfplan`, guaranteeing you apply exactly what was reviewed. This project doesn't, because a saved plan file embeds the service principal's client secret **in plaintext** — the same reason `*tfplan*` is gitignored. Publishing it as an artifact would park a live credential in Azure DevOps.
+
+The trade-off is a window between the plan you read and the apply you approve. Acceptable for a single operator; in a team you would solve the secret-handling problem instead.
+
+---
+
 ## 🗺️ Roadmap
 
 | Phase | Status | |
@@ -264,8 +338,8 @@ terraform destroy
 | 3. Environment configuration | ✅ | dev + staging composing the same modules |
 | 4. Remote Terraform state | ✅ | Azure Storage backend, one state file per environment |
 | 5. Local validation | ✅ | init → fmt → validate → plan → apply → destroy, end to end |
-| 6. Azure DevOps pipeline | 🔜 | Service connection, `azure-pipelines.yml`, approval gates |
-| 7. Multi-environment promotion | 🔜 | dev auto-applies, staging gated on approval |
+| 6. Azure DevOps pipeline | 🟡 | OIDC service connection, `fmt`/`validate`/`plan` green, both environments gated. `apply` stages pending |
+| 7. Multi-environment promotion | 🔜 | Gated apply for dev and staging, plus a manual-only destroy pipeline |
 
 ### Target pipeline flow
 
@@ -392,6 +466,77 @@ CNI Overlay also keeps pod IPs off the node subnet entirely, so a single `/24` p
 `.gitattributes` forces LF on `*.sh`, because a CRLF shell script on a Linux pipeline agent fails with `bad interpreter`.
 
 Emoji in filenames render fine on GitHub (it percent-encodes them automatically) — but a **space** in a filename silently breaks the markdown image, emitting literal text instead of an `<img>`. Verified against GitHub's markdown API.
+</details>
+
+<details>
+<summary><strong>📥 Importing a GitHub repo into Azure Repos is a snapshot, not a sync</strong></summary>
+
+Importing looked like "connecting" the two, but it's a **one-time copy**. Days later the Azure Repos copy still sat at the initial commit while GitHub had a dozen more, with nothing to warn me.
+
+Worth deciding early: whichever repo the pipeline builds from becomes the real source of truth. Pointing the pipeline at GitHub means forgetting to push the mirror is harmless. Pointing it at the mirror means the public repo can silently rot.
+
+Azure DevOps has no native pull-sync from GitHub, so a second remote plus two pushes is the only honest way to keep both current:
+
+```bash
+git remote set-url --add --push origin <github-url>
+git remote set-url --add --push origin <azure-repos-url>
+```
+</details>
+
+<details>
+<summary><strong>🔑 A service connection needs two permission systems, not one</strong></summary>
+
+The single biggest time sink. Azure DevOps creates the connection with **Contributor** on the subscription, which is not enough for this config:
+
+- Contributor **cannot manage role assignments** — needed for the subscription-scoped `azurerm_role_assignment`. Fix: add **User Access Administrator** (or use Owner).
+- **No Azure RBAC role grants directory permissions.** Creating an Entra app registration needs Microsoft Graph `Application.ReadWrite.OwnedBy` as an *application* permission, plus admin consent.
+
+Azure RBAC governs resources; Entra governs the directory. Being Owner of a subscription grants nothing in the directory, and the resulting error (`Insufficient privileges to complete the operation`) says nothing about which system refused you.
+</details>
+
+<details>
+<summary><strong>🧩 Admin consent is a separate step, and it can't be done from Cloud Shell</strong></summary>
+
+Three traps stacked on top of each other:
+
+1. `az ad app permission add` only **requests** a permission. Nothing works until consent is granted — and an unconsented permission fails identically to one that was never added.
+2. The CLI then suggests `az ad app permission grant`, which is for **delegated** permissions. Application permissions need `admin-consent`. Following the hint creates a grant that does nothing.
+3. `az ad app permission admin-consent` **fails in Cloud Shell** with *"not a supported MSI token audience"*. It calls a legacy Azure AD portal API that only accepts an interactive user token, and Cloud Shell authenticates as a managed identity.
+
+Do consent in the portal, where you also get visual confirmation the CLI's silent success doesn't give you.
+</details>
+
+<details>
+<summary><strong>🔢 Graph app role GUIDs must be looked up, never remembered</strong></summary>
+
+A wrong GUID produces `Claim is invalid: <guid> does not exist on resource application 00000003-…`. The portal also stops resolving the friendly name and shows the raw GUID — that's the tell.
+
+Look it up from your own tenant rather than trusting any source:
+
+```bash
+az ad sp show --id 00000003-0000-0000-c000-000000000000 \
+  --query "appRoles[?value=='Application.ReadWrite.OwnedBy']"
+```
+
+Better still, use the portal's permission picker — it can only emit valid IDs. And beware the neighbours: `AppRoleAssignment.ReadWrite.All` ("manage app role assignments") and `Application.ReadWrite.All` ("read and write all applications") sit next to `Application.ReadWrite.OwnedBy` and sound nearly identical. Only the last is least-privilege for creating your own apps.
+</details>
+
+<details>
+<summary><strong>🏢 A personal-account Azure DevOps org can't create service connections</strong></summary>
+
+The automatic service connection failed with *"The string must have at least one non-white-space character. Parameter name: tenantid"* — the org was backed by a personal Microsoft account, so there was no Entra tenant to resolve.
+
+Symptom of the same root cause: installing the Azure Pipelines GitHub App landed on a blank page showing **"Anonymous"**, because the marketplace acquisition flow (`aex.dev.azure.com/signup/github`) needs an unambiguous signed-in identity.
+
+Fix: **Organization settings → Microsoft Entra → Connect directory.** Note it forces every user to sign out, and any member not native to the target directory goes through identity mapping on next sign-in. It also invalidates cached Git credentials, so pushes to Azure Repos need re-authentication afterwards.
+</details>
+
+<details>
+<summary><strong>🟥 Red squiggles on marketplace tasks are your editor, not the pipeline</strong></summary>
+
+`TerraformInstaller@1` shows as *"Value is not accepted"* with a huge list of valid values in VS Code. That list contains only Microsoft's **built-in** tasks — the extension validates against a static schema and has no idea which marketplace extensions your organization has installed.
+
+The pipeline resolves the task fine. Point the Azure Pipelines extension at your organization if you want the warnings gone.
 </details>
 
 ---
