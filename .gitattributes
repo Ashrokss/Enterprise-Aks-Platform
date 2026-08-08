@@ -1,0 +1,17 @@
+# Keep line endings sane between Windows here and the Linux pipeline agents.
+* text=auto
+
+# Shell scripts must stay LF. With CRLF, Linux fails with "bad interpreter".
+*.sh text eol=lf
+
+# Terraform and config files
+*.tf    text eol=lf
+*.tfvars text eol=lf
+*.hcl   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+
+# Never convert these.
+*.png binary
+*.jpg binary

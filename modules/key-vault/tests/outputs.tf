@@ -1,0 +1,14 @@
+output "key_vault_id" {
+  value       = module.key_vault.key_vault_id
+  description = "The resource ID of the Key Vault"
+}
+
+output "key_vault_name" {
+  value       = module.key_vault.key_vault_name
+  description = "The name of the Key Vault"
+}
+
+output "key_vault_uri" {
+  value       = module.key_vault.key_vault_uri
+  description = "The URI of the Key Vault"
+}
