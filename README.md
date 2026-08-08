@@ -259,7 +259,7 @@ Docker Build
 Azure Container Registry
     |
     v
-AKS
+   AKS
 ```
 
 ### Kubernetes Application Deployment
@@ -273,13 +273,13 @@ Introduce Argo CD after the Kubernetes deployment workflow is understood.
 Target flow:
 
 ```text
-GitHub
+ GitHub
     |
     v
 Argo CD
     |
     v
-AKS
+   AKS
 ```
 
 Argo CD will monitor the desired Kubernetes state in Git and synchronize the AKS cluster.
