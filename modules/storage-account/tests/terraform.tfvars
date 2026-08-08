@@ -1,4 +1,4 @@
+# Storage account names are globally unique - change the suffix before running.
+name                = "testsaakslab01"
 resource_group_name = "test-rg"
-resource_group_location = "Central India"
-
-storage_account_name = ["testsa1", "testsa2", "testsa3"]
+location            = "centralindia"

@@ -1,0 +1,18 @@
+# Normalize line endings so files behave the same on Windows dev machines
+# and on the Linux agents that run the Azure DevOps pipelines.
+* text=auto
+
+# Shell scripts must stay LF. With CRLF, Linux fails with "bad interpreter".
+*.sh text eol=lf
+
+# Terraform and config files
+*.tf    text eol=lf
+*.tfvars text eol=lf
+*.hcl   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+
+# Binary files must never be line-ending converted.
+*.png binary
+*.jpg binary

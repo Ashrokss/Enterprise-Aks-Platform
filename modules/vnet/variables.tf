@@ -1,4 +1,4 @@
-variable "vnet_name" {
+variable "name" {
   type        = string
   description = "The name of the virtual network"
 }
@@ -22,4 +22,10 @@ variable "dns_servers" {
   type        = list(string)
   default     = []
   description = "Custom DNS servers for the virtual network. Empty uses Azure-provided DNS."
+}
+
+variable "tags" {
+  type        = map(string)
+  default     = {}
+  description = "Tags applied to the virtual network"
 }

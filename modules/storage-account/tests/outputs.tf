@@ -1,9 +1,9 @@
-output "storage_account_names" {
-  value       = module.storage_account.storage_account_name
-  description = "Map of storage account names by key"
+output "storage_account_id" {
+  value       = module.storage_account.storage_account_id
+  description = "The resource ID of the storage account"
 }
 
-output "storage_account_ids" {
-  value       = module.storage_account.storage_account_id
-  description = "Map of storage account IDs by key"
+output "storage_account_name" {
+  value       = module.storage_account.storage_account_name
+  description = "The name of the storage account"
 }
