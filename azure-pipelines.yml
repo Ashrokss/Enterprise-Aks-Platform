@@ -1,5 +1,6 @@
-# Terraform CI for the AKS platform.
-# This pipeline only validates and plans. Apply is added once plan output looks right.
+# Terraform CI/CD for the AKS platform.
+# fmt and validate need no credentials. plan reads Azure. apply is gated behind
+# an approval on the matching Azure DevOps environment.
 
 trigger:
   branches:
@@ -101,3 +102,80 @@ stages:
                 cd environments/staging
                 terraform init -input=false
                 terraform plan -input=false -lock-timeout=5m
+
+  # deployment jobs bind to an Azure DevOps environment, which is what makes the
+  # approval check fire. They also do not clone the repo unless told to.
+  - stage: apply_dev
+    displayName: Apply dev
+    dependsOn: plan
+    jobs:
+      - deployment: apply_dev
+        displayName: apply dev
+        environment: dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: Install Terraform $(TF_VERSION)
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: terraform apply (dev)
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      set -e
+                      export ARM_USE_OIDC=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                      cd environments/dev
+                      terraform init -input=false
+                      terraform apply -auto-approve -input=false -lock-timeout=5m
+
+  # Staging only runs after dev succeeded, so a broken change cannot reach it.
+  - stage: apply_staging
+    displayName: Apply staging
+    dependsOn: apply_dev
+    jobs:
+      - deployment: apply_staging
+        displayName: apply staging
+        environment: staging
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: Install Terraform $(TF_VERSION)
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: terraform apply (staging)
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      set -e
+                      export ARM_USE_OIDC=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                      cd environments/staging
+                      terraform init -input=false
+                      terraform apply -auto-approve -input=false -lock-timeout=5m

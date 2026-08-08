@@ -1,0 +1,114 @@
+# Tears down one environment. Separate from the CI pipeline on purpose so no
+# push can ever trigger a destroy.
+#
+# Run it from Pipelines -> Run pipeline, pick the environment, and type the same
+# environment name into confirm.
+
+name: destroy-${{ parameters.environment }}-$(Date:yyyyMMdd).$(Rev:r)
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: Environment to destroy
+    type: string
+    default: dev
+    values:
+      - dev
+      - staging
+
+  - name: confirm
+    displayName: Type the environment name again to confirm
+    type: string
+    default: ''
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  TF_VERSION: 1.15.5
+  SERVICE_CONNECTION: azure-sub-connection
+  TF_IN_AUTOMATION: 'true'
+
+stages:
+  # Shows what would be destroyed so the approver reads a real list rather than
+  # trusting the pipeline name.
+  - stage: preview
+    displayName: Preview destroy
+    jobs:
+      - job: plan_destroy
+        displayName: plan -destroy (${{ parameters.environment }})
+        steps:
+          # Guard runs first so a mistyped confirmation costs nothing.
+          - script: |
+              if [ "${{ parameters.confirm }}" != "${{ parameters.environment }}" ]; then
+                echo "Confirmation did not match."
+                echo "Expected: ${{ parameters.environment }}"
+                echo "Type the environment name exactly to proceed."
+                exit 1
+              fi
+              echo "Confirmed: destroying ${{ parameters.environment }}"
+            displayName: Check confirmation
+
+          - task: TerraformInstaller@1
+            displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: AzureCLI@2
+            displayName: terraform plan -destroy
+            inputs:
+              azureSubscription: $(SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                cd environments/${{ parameters.environment }}
+                terraform init -input=false
+                terraform plan -destroy -input=false -lock-timeout=5m
+
+  # The environment binding is what makes the approval check fire.
+  - stage: destroy
+    displayName: Destroy
+    dependsOn: preview
+    jobs:
+      - deployment: destroy_env
+        displayName: destroy ${{ parameters.environment }}
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: Install Terraform $(TF_VERSION)
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: terraform destroy
+                  inputs:
+                    azureSubscription: $(SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      set -e
+                      export ARM_USE_OIDC=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
+
+                      cd environments/${{ parameters.environment }}
+                      terraform init -input=false
+                      terraform destroy -auto-approve -input=false -lock-timeout=5m
