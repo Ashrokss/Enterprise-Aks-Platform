@@ -1,5 +1,4 @@
-# Normalize line endings so files behave the same on Windows dev machines
-# and on the Linux agents that run the Azure DevOps pipelines.
+# Keep line endings sane between Windows here and the Linux pipeline agents.
 * text=auto
 
 # Shell scripts must stay LF. With CRLF, Linux fails with "bad interpreter".
@@ -13,6 +12,6 @@
 *.yaml  text eol=lf
 *.md    text eol=lf
 
-# Binary files must never be line-ending converted.
+# Never convert these.
 *.png binary
 *.jpg binary

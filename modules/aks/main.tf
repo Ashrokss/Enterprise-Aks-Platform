@@ -10,16 +10,21 @@ resource "azurerm_kubernetes_cluster" "aks" {
     node_count     = var.node_count
     vm_size        = var.vm_size
     vnet_subnet_id = var.subnet_id
+
+    # Azure sets this itself, so leaving it out shows up as drift on every plan.
+    upgrade_settings {
+      max_surge = "10%"
+    }
   }
 
-  # AKS uses this service principal to manage Azure resources such as load balancers.
+  # AKS uses this to manage load balancers, disks and the node resource group.
   service_principal {
     client_id     = var.client_id
     client_secret = var.client_secret
   }
 
-  # Azure CNI Overlay keeps pod IPs out of the node subnet, so a small subnet is enough.
-  # service_cidr must not overlap the VNet address space.
+  # Overlay keeps pod IPs off the node subnet, so a /24 is plenty.
+  # service_cidr must not overlap the vnet.
   network_profile {
     network_plugin      = "azure"
     network_plugin_mode = "overlay"

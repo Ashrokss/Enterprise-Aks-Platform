@@ -43,7 +43,7 @@ variable "node_count" {
 variable "vm_size" {
   type        = string
   default     = "Standard_D2s_v3"
-  description = "The VM size used for the nodes"
+  description = "The VM size used for the nodes. AKS system node pools need at least 2 vCPU and 4 GB, which rules out the small burstable sizes."
 }
 
 variable "kubernetes_version" {

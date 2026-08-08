@@ -1,4 +1,4 @@
-# Used to look up the tenant Terraform is authenticated against.
+# Tenant of whoever is running Terraform.
 data "azurerm_client_config" "current" {}
 
 resource "azurerm_key_vault" "key_vault" {
@@ -8,10 +8,10 @@ resource "azurerm_key_vault" "key_vault" {
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = var.sku_name
 
-  # RBAC is the current way to control who can read secrets.
+  # RBAC instead of the older access policy model.
   rbac_authorization_enabled = var.rbac_authorization_enabled
 
-  # Soft delete cannot be turned off. Purge protection is left off so the vault
+  # Soft delete is always on. Purge protection stays off so destroy actually cleans up.
   soft_delete_retention_days = var.soft_delete_retention_days
   purge_protection_enabled   = var.purge_protection_enabled
 

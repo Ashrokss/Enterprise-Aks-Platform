@@ -30,5 +30,5 @@ override.tf.json
 #
 # !example_override.tf
 
-# Include tfplan files to ignore the plan output of command: terraform plan -out=tfplan
-# example: *tfplan*
+# Saved plans from terraform plan -out=tfplan. These hold the SP secret in plaintext.
+*tfplan*
