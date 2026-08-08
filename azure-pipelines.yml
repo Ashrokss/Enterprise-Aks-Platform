@@ -22,17 +22,10 @@ stages:
       - job: fmt_and_validate
         displayName: fmt and validate
         steps:
-          # Downloaded straight from HashiCorp so the version is pinned and the
-          # pipeline does not depend on a marketplace extension or on whatever
-          # Terraform happens to be baked into the agent image.
-          - script: |
-              set -e
-              curl -sSLo "$(Agent.TempDirectory)/terraform.zip" \
-                "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
-              unzip -o "$(Agent.TempDirectory)/terraform.zip" -d "$(Agent.TempDirectory)/tfbin"
-              echo "##vso[task.prependpath]$(Agent.TempDirectory)/tfbin"
-              "$(Agent.TempDirectory)/tfbin/terraform" version
+          - task: TerraformInstaller@1
             displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
 
           # Fails the build on unformatted code before anything slower runs.
           - script: terraform fmt -check -recursive
@@ -56,13 +49,10 @@ stages:
       - job: plan_dev
         displayName: plan dev
         steps:
-          - script: |
-              set -e
-              curl -sSLo "$(Agent.TempDirectory)/terraform.zip" \
-                "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
-              unzip -o "$(Agent.TempDirectory)/terraform.zip" -d "$(Agent.TempDirectory)/tfbin"
-              echo "##vso[task.prependpath]$(Agent.TempDirectory)/tfbin"
+          - task: TerraformInstaller@1
             displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
 
           - task: AzureCLI@2
             displayName: terraform plan (dev)
@@ -88,13 +78,10 @@ stages:
       - job: plan_staging
         displayName: plan staging
         steps:
-          - script: |
-              set -e
-              curl -sSLo "$(Agent.TempDirectory)/terraform.zip" \
-                "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
-              unzip -o "$(Agent.TempDirectory)/terraform.zip" -d "$(Agent.TempDirectory)/tfbin"
-              echo "##vso[task.prependpath]$(Agent.TempDirectory)/tfbin"
+          - task: TerraformInstaller@1
             displayName: Install Terraform $(TF_VERSION)
+            inputs:
+              terraformVersion: $(TF_VERSION)
 
           - task: AzureCLI@2
             displayName: terraform plan (staging)
