@@ -282,17 +282,22 @@ flowchart LR
     style AS fill:#107C10,color:#fff
 ```
 
-**Four stages, split by whether they need credentials and whether they change anything.**
+| Stage | Needs Azure? | Notes |
+|---|---|---|
+| `validate` | No | `fmt -check` fails fast. `init -backend=false` — schemas only, no state, no credentials |
+| `plan` | Read-only | One job per environment, gated behind `validate` |
+| `apply_dev` | Write | Approval required |
+| `apply_staging` | Write | `dependsOn: apply_dev`, so a change that breaks dev can't reach staging |
 
-`validate` runs `fmt -check` first because it costs nothing and catches the cheapest class of mistake. Then `terraform init -backend=false && terraform validate` for both environments. The `-backend=false` matters: validate only needs provider *schemas*, not remote state, so the whole stage runs **without touching Azure at all**. Broken HCL is caught for free.
+![Pipeline applying dev](screenshots/pipeline_apply_dev.png)
 
-`plan` depends on `validate`, so it never runs against code that couldn't compile. One job per environment, both read-only.
+`apply dev` in 5m 20s → **`Apply complete! Resources: 12 added, 0 changed, 0 destroyed`**. `Apply staging` sits unstarted, waiting on its own approval.
 
-`apply_dev` and `apply_staging` are gated. Staging depends on dev, so a change that breaks dev can never reach staging — the promotion chain is enforced by the dependency, not by convention.
+The `Checkout` step exists only because of the explicit `- checkout: self` — deployment jobs skip it by default.
 
 ### Authentication — no secrets anywhere
 
-The service connection uses **workload identity federation with OIDC**, so nothing needs storing or rotating:
+Workload identity federation with OIDC. Nothing to store or rotate:
 
 ```yaml
 - task: AzureCLI@2
@@ -307,43 +312,41 @@ The service connection uses **workload identity federation with OIDC**, so nothi
       export ARM_SUBSCRIPTION_ID=`az account show --query id --output tsv`
 ```
 
-`$idToken` is a short-lived token minted per run. Those four `ARM_*` variables are the entire contract between Azure DevOps and the azurerm provider.
+`$idToken` is minted per run and expires with it. Those four variables are the whole contract with the azurerm provider.
 
-Two non-obvious details in there:
-
-- **Backticks, not `$(...)`.** Azure DevOps treats `$(...)` as its own macro syntax and expands it before bash ever sees it, so command substitution has to use backticks.
-- **`ARM_SUBSCRIPTION_ID` is mandatory.** azurerm 4.x requires an explicit subscription; it can no longer infer one.
+- **Backticks, not `$(...)`** — Azure DevOps expands `$(...)` as its own macro before bash sees it.
+- **`ARM_SUBSCRIPTION_ID` is mandatory** — azurerm 4.x no longer infers a subscription.
 
 ### Permissions the pipeline identity needs
 
-Azure DevOps creates the service connection with **Contributor** and nothing else. That is not enough:
+Azure DevOps grants the service connection **Contributor** only. Not enough:
 
-| Grant | Why | Failure without it |
+| Grant | Needed for | Failure without it |
 |---|---|---|
-| **User Access Administrator** | The config creates subscription-scoped role assignments | `AuthorizationFailed` |
-| Graph **`Application.ReadWrite.OwnedBy`** + admin consent | The config creates an Entra app registration | `Insufficient privileges` |
+| **User Access Administrator** | Subscription-scoped role assignments | `AuthorizationFailed` |
+| Graph **`Application.ReadWrite.OwnedBy`** + consent | Creating the Entra app registration | `Insufficient privileges` |
 
-Azure RBAC and Entra directory permissions are **separate systems** — no RBAC role, including Owner, grants the ability to create app registrations.
+Azure RBAC and Entra are **separate systems** — no RBAC role, Owner included, lets you create app registrations.
 
 ### Environments and approval gates
 
-`dev` and `staging` exist as Azure DevOps **Environments**, each with an approval check. Approvals attach to environments, which is why apply stages must be `deployment` jobs rather than plain `job`s.
+Approvals attach to Azure DevOps **Environments**, which is why apply stages must be `deployment` jobs.
 
-Both environments are gated, including `dev` — which departs from the usual "dev auto-applies" pattern on purpose. `trigger: main` means every push would otherwise spin up a real AKS cluster that bills until someone remembers it. A gate on `dev` keeps teardown deliberate.
+Both `dev` and `staging` are gated — deliberately departing from "dev auto-applies", because `trigger: main` would otherwise build a billing AKS cluster on every push.
 
-> ⚠️ **Ordering hazard:** a `deployment` job auto-creates its environment, but **not** its approvals. Push apply stages before configuring approvals and the first run applies ungated.
+> ⚠️ A `deployment` job auto-creates its environment but **not** its approvals. Push apply stages before configuring approvals and the first run applies ungated.
 
 ### Why the apply stages re-plan
 
-The textbook pattern is `plan -out=tfplan` → publish as a pipeline artifact → `apply tfplan`, guaranteeing you apply exactly what was reviewed. This project doesn't, because a saved plan file embeds the service principal's client secret **in plaintext** — the same reason `*tfplan*` is gitignored. Publishing it as an artifact would park a live credential in Azure DevOps.
+The textbook pattern is `plan -out=tfplan` → artifact → `apply tfplan`. Not used here: a saved plan embeds the SP client secret **in plaintext**, which is why `*tfplan*` is gitignored. Publishing it would park a live credential in Azure DevOps.
 
-The trade-off is a window between the plan you read and the apply you approve. Acceptable for a single operator; in a team you would solve the secret-handling problem instead.
+Trade-off: a window between the plan you read and the apply you approve. Fine for one operator.
 
 ---
 
 ## 🧨 Destroy pipeline
 
-[`azure-pipelines-destroy.yml`](azure-pipelines-destroy.yml) tears down one environment on demand. This is a learning platform, so environments are meant to be disposable — an idle AKS node bills by the hour whether you are using it or not.
+[`azure-pipelines-destroy.yml`](azure-pipelines-destroy.yml) tears down one environment on demand. Environments here are disposable — an idle AKS node bills by the hour.
 
 ```mermaid
 flowchart LR
@@ -357,16 +360,16 @@ flowchart LR
     style DES fill:#A80000,color:#fff
 ```
 
-It is a **separate pipeline file** rather than a parameter on the CI pipeline. One file that both auto-triggers on push and can destroy is one templating mistake away from a very bad afternoon.
+A **separate file**, not a parameter on the CI pipeline — one file that both auto-triggers on push and can destroy is one templating mistake from a bad afternoon.
 
-### Four independent safety layers
+### Four safety layers
 
 | Layer | Mechanism |
 |---|---|
-| Cannot be triggered by code | `trigger: none` and `pr: none` — manual runs only |
-| Cannot target the wrong thing | `environment` is a constrained choice: `dev` or `staging` |
-| Cannot run by accident | You must **retype the environment name**, checked as the very first step |
-| Cannot run unwitnessed | Bound to the same gated environment, so it needs an approval click |
+| Not triggerable by code | `trigger: none`, `pr: none` |
+| Can't target the wrong thing | `environment` is a fixed choice: `dev` or `staging` |
+| Can't run by accident | Must **retype the environment name**, checked as step one |
+| Can't run unwitnessed | Bound to the gated environment — needs an approval |
 
 The confirmation check runs before Terraform is even installed, so a mistyped run costs nothing:
 
@@ -376,34 +379,39 @@ The confirmation check runs before Terraform is even installed, so a mistyped ru
       echo "Confirmation did not match."
       exit 1
     fi
-  displayName: Check confirmation
 ```
 
 ### Preview before the gate
 
-The `preview` stage runs `terraform plan -destroy` **before** the approval. So the approver reads a concrete list — `Plan: 0 to add, 0 to change, 12 to destroy` — rather than trusting the pipeline's name. Approving a list beats approving an intention.
+`preview` runs `terraform plan -destroy` **before** the approval, so you approve a concrete list — `0 to add, 0 to change, 12 to destroy` — not just a pipeline name.
+
+![Destroy held at the environment gate](screenshots/approval_gate_for_destroy.png)
+
+`plan -destroy (dev)` green in 47s, then `Destroy` stopped dead awaiting authorization. Nothing was deleted while it waited.
+
+Two gates that look alike and both block:
+
+| | Fires | Question |
+|---|---|---|
+| **Permit** | Once per pipeline + resource | May this pipeline use `dev` at all? |
+| **Approval** | Every run | Should *this run* proceed? |
+
+A new pipeline hits both on its first execution; afterwards only the approval.
 
 ### Running it
 
-> **Pipelines → ⚠️ Destroy environment → Run pipeline**
+> **Pipelines → ⚠️ Destroy environment → Run pipeline** → environment `dev`, confirm `dev`
 
-| Parameter | Value |
-|---|---|
-| Environment to destroy | `dev` |
-| Type the environment name again to confirm | `dev` |
+10–15 minutes, AKS deletion being the slow part. Two things easily overlooked:
 
-Takes 10–15 minutes; AKS deletion is the slow part. Two things it handles that are easy to overlook:
-
-- **The Key Vault is purged, not just soft-deleted.** azurerm defaults `purge_soft_delete_on_destroy` to true, so the vault name is immediately reusable instead of being locked for the 7-day retention window.
-- **The Entra app registration is deleted too.** The pipeline identity created `platform-dev-sp`, so it owns it and is allowed to remove it.
-
-Verify you are back to zero:
+- **The Key Vault is purged**, not soft-deleted — azurerm defaults `purge_soft_delete_on_destroy` to true, so the name is immediately reusable.
+- **The Entra app registration goes too** — the pipeline created `platform-dev-sp`, so it owns it and may delete it.
 
 ```bash
 az group list --query "[?starts_with(name,'platform-')].name" -o table
 ```
 
-Empty output means only `terraform-state-rg` remains, which costs cents per month.
+Empty output means only `terraform-state-rg` remains, at cents per month.
 
 ---
 
