@@ -20,8 +20,8 @@ An Azure platform-engineering project that provisions a **multi-environment AKS 
 
 Every line is written by hand rather than copied from a template — the goal is to *understand* Terraform, Azure networking, AKS, and CI/CD, not just to make `terraform apply` succeed. Where something bit me, it's documented in [Lessons learned](#-lessons-learned) instead of quietly fixed.
 
-**Working today:** 7 Terraform modules · 2 isolated environments · remote state with locking · service-principal auth · secrets in Key Vault · CI pipeline running `fmt` → `validate` → `plan` on both environments with OIDC federation
-**Next up:** gated `apply` stages and a manual-only destroy pipeline
+**Working today:** 7 Terraform modules · 2 isolated environments · remote state with locking · secrets in Key Vault · CI/CD with OIDC federation, gated `apply`, and a confirmation-guarded destroy pipeline
+**Next up:** ACR and a sample workload on the cluster
 
 ---
 
@@ -88,7 +88,8 @@ Enterprise-Aks-Platform/
 ├── scripts/
 │   └── init.sh               # bootstraps the state backend
 ├── screenshots/
-├── azure-pipelines.yml       # CI: fmt, validate, plan
+├── azure-pipelines.yml       # CI/CD: fmt, validate, plan, gated apply
+├── azure-pipelines-destroy.yml  # manual only, confirmation + approval
 ├── architecture.png
 ├── .gitattributes            # LF endings for Linux pipeline agents
 ├── .gitignore
@@ -262,21 +263,32 @@ terraform destroy
 
 ```mermaid
 flowchart LR
-    PUSH([push to main]) --> FMT[terraform fmt -check]
-    FMT --> VAL[terraform validate<br/>dev + staging]
+    PUSH([push to main]) --> FMT[fmt -check]
+    FMT --> VAL[validate<br/>dev + staging]
     VAL --> PD[plan · dev]
     VAL --> PS[plan · staging]
+    PD --> G1{{approval}}
+    PS --> G1
+    G1 --> AD[apply · dev]
+    AD --> G2{{approval}}
+    G2 --> AS[apply · staging]
 
     style FMT fill:#844FBA,color:#fff
     style PD fill:#0078D4,color:#fff
     style PS fill:#0078D4,color:#fff
+    style G1 fill:#D83B01,color:#fff
+    style G2 fill:#D83B01,color:#fff
+    style AD fill:#107C10,color:#fff
+    style AS fill:#107C10,color:#fff
 ```
 
-**Two stages, deliberately split by whether they need credentials.**
+**Four stages, split by whether they need credentials and whether they change anything.**
 
 `validate` runs `fmt -check` first because it costs nothing and catches the cheapest class of mistake. Then `terraform init -backend=false && terraform validate` for both environments. The `-backend=false` matters: validate only needs provider *schemas*, not remote state, so the whole stage runs **without touching Azure at all**. Broken HCL is caught for free.
 
-`plan` depends on `validate`, so it never runs against code that couldn't compile. One job per environment.
+`plan` depends on `validate`, so it never runs against code that couldn't compile. One job per environment, both read-only.
+
+`apply_dev` and `apply_staging` are gated. Staging depends on dev, so a change that breaks dev can never reach staging — the promotion chain is enforced by the dependency, not by convention.
 
 ### Authentication — no secrets anywhere
 
@@ -329,6 +341,72 @@ The trade-off is a window between the plan you read and the apply you approve. A
 
 ---
 
+## 🧨 Destroy pipeline
+
+[`azure-pipelines-destroy.yml`](azure-pipelines-destroy.yml) tears down one environment on demand. This is a learning platform, so environments are meant to be disposable — an idle AKS node bills by the hour whether you are using it or not.
+
+```mermaid
+flowchart LR
+    RUN([manual run]) --> CHK[check confirmation<br/>text matches]
+    CHK --> PRE[plan -destroy<br/>lists what dies]
+    PRE --> GATE{{approval}}
+    GATE --> DES[terraform destroy]
+
+    style CHK fill:#D83B01,color:#fff
+    style GATE fill:#D83B01,color:#fff
+    style DES fill:#A80000,color:#fff
+```
+
+It is a **separate pipeline file** rather than a parameter on the CI pipeline. One file that both auto-triggers on push and can destroy is one templating mistake away from a very bad afternoon.
+
+### Four independent safety layers
+
+| Layer | Mechanism |
+|---|---|
+| Cannot be triggered by code | `trigger: none` and `pr: none` — manual runs only |
+| Cannot target the wrong thing | `environment` is a constrained choice: `dev` or `staging` |
+| Cannot run by accident | You must **retype the environment name**, checked as the very first step |
+| Cannot run unwitnessed | Bound to the same gated environment, so it needs an approval click |
+
+The confirmation check runs before Terraform is even installed, so a mistyped run costs nothing:
+
+```yaml
+- script: |
+    if [ "${{ parameters.confirm }}" != "${{ parameters.environment }}" ]; then
+      echo "Confirmation did not match."
+      exit 1
+    fi
+  displayName: Check confirmation
+```
+
+### Preview before the gate
+
+The `preview` stage runs `terraform plan -destroy` **before** the approval. So the approver reads a concrete list — `Plan: 0 to add, 0 to change, 12 to destroy` — rather than trusting the pipeline's name. Approving a list beats approving an intention.
+
+### Running it
+
+> **Pipelines → ⚠️ Destroy environment → Run pipeline**
+
+| Parameter | Value |
+|---|---|
+| Environment to destroy | `dev` |
+| Type the environment name again to confirm | `dev` |
+
+Takes 10–15 minutes; AKS deletion is the slow part. Two things it handles that are easy to overlook:
+
+- **The Key Vault is purged, not just soft-deleted.** azurerm defaults `purge_soft_delete_on_destroy` to true, so the vault name is immediately reusable instead of being locked for the 7-day retention window.
+- **The Entra app registration is deleted too.** The pipeline identity created `platform-dev-sp`, so it owns it and is allowed to remove it.
+
+Verify you are back to zero:
+
+```bash
+az group list --query "[?starts_with(name,'platform-')].name" -o table
+```
+
+Empty output means only `terraform-state-rg` remains, which costs cents per month.
+
+---
+
 ## 🗺️ Roadmap
 
 | Phase | Status | |
@@ -338,27 +416,9 @@ The trade-off is a window between the plan you read and the apply you approve. A
 | 3. Environment configuration | ✅ | dev + staging composing the same modules |
 | 4. Remote Terraform state | ✅ | Azure Storage backend, one state file per environment |
 | 5. Local validation | ✅ | init → fmt → validate → plan → apply → destroy, end to end |
-| 6. Azure DevOps pipeline | 🟡 | OIDC service connection, `fmt`/`validate`/`plan` green, both environments gated. `apply` stages pending |
-| 7. Multi-environment promotion | 🔜 | Gated apply for dev and staging, plus a manual-only destroy pipeline |
-
-### Target pipeline flow
-
-```mermaid
-flowchart TD
-    A([git push]) --> B[terraform fmt -check]
-    B --> C[terraform validate]
-    C --> D[plan · dev]
-    D --> E[apply · dev]
-    E --> F{{Manual approval}}
-    F --> G[plan · staging]
-    G --> H[apply · staging]
-
-    style F fill:#D83B01,color:#fff
-    style E fill:#107C10,color:#fff
-    style H fill:#107C10,color:#fff
-```
-
-Authentication uses an Azure DevOps **service connection** with workload identity federation — no secrets stored in the pipeline.
+| 6. Azure DevOps pipeline | ✅ | OIDC service connection, `fmt` → `validate` → `plan` → gated `apply`, dev deployed by pipeline |
+| 7. Multi-environment promotion | ✅ | Staging gated behind dev, plus a manual-only destroy pipeline |
+| 8. Application delivery | 🔜 | ACR, a sample workload, then Argo CD |
 
 ---
 
@@ -537,6 +597,17 @@ Fix: **Organization settings → Microsoft Entra → Connect directory.** Note i
 `TerraformInstaller@1` shows as *"Value is not accepted"* with a huge list of valid values in VS Code. That list contains only Microsoft's **built-in** tasks — the extension validates against a static schema and has no idea which marketplace extensions your organization has installed.
 
 The pipeline resolves the task fine. Point the Azure Pipelines extension at your organization if you want the warnings gone.
+</details>
+
+<details>
+<summary><strong>📦 Deployment jobs do not clone your repository</strong></summary>
+
+Approvals only attach to Azure DevOps **environments**, and only a `deployment` job can bind to one. So any stage that needs a gate has to be a `deployment` job rather than a plain `job` — which brings two surprises:
+
+- A `deployment` job does **not** check out source by default. Without an explicit `- checkout: self` the agent has no repo, and the error complains about missing configuration rather than a missing clone.
+- The nesting is deeper: `deployment → strategy → runOnce → deploy → steps`.
+
+The gate is worth the ceremony, but the silent no-checkout is the kind of thing that costs an hour the first time.
 </details>
 
 ---
