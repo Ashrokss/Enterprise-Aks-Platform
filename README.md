@@ -402,10 +402,12 @@ A new pipeline hits both on its first execution; afterwards only the approval.
 
 > **Pipelines → ⚠️ Destroy environment → Run pipeline** → environment `dev`, confirm `dev`
 
-10–15 minutes, AKS deletion being the slow part. Two things easily overlooked:
+![Destroy complete](screenshots/pipeline_destroy_dev.png)
+
+**`Destroy complete! Resources: 12 destroyed`** in 7m 15s — AKS deletion is the slow part. Two things easily overlooked:
 
 - **The Key Vault is purged**, not soft-deleted — azurerm defaults `purge_soft_delete_on_destroy` to true, so the name is immediately reusable.
-- **The Entra app registration goes too** — the pipeline created `platform-dev-sp`, so it owns it and may delete it.
+- **The Entra app registration goes too** — visible in the log as `azuread_application.app: Destruction complete`. The pipeline created `platform-dev-sp`, so it owns it and may delete it. This is the step that fails without the Graph permission.
 
 ```bash
 az group list --query "[?starts_with(name,'platform-')].name" -o table
